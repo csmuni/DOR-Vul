@@ -1,0 +1,51 @@
+# =========================
+# Python & Environments
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+.venv/
+pip-log.txt
+
+# =========================
+# Deep Learning / PyTorch
+# =========================
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+*.h5
+*.onnx
+runs/
+wandb/
+logs/
+checkpoints/
+
+# =========================
+# Datasets & Outputs
+# =========================
+*.csv
+*.tsv
+*.zip
+*.tar.gz
+data/
+datasets/
+outputs/
+predictions/
+.tmp/
+
+# =========================
+# IDEs & OS Files
+# =========================
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

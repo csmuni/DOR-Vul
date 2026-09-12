@@ -1,0 +1,33 @@
+{
+  "system": {
+    "device_preference": "cuda",
+    "precision": "fp32",
+    "use_cache": false,
+    "deterministic_eval": true
+  },
+  "model": {
+    "backbone": "Salesforce/codet5p-220m",
+    "hidden_size": 768,
+    "classifier_dropout": 0.1,
+    "max_code_len": 512,
+    "max_desc_len": 512
+  },
+  "generation": {
+    "num_beams": 5,
+    "no_repeat_ngram_size": 3,
+    "repetition_penalty": 1.2,
+    "length_penalty": 1.0
+  },
+  "datasets": {
+    "reveal": {
+      "num_cwe_classes": 71,
+      "lambda_fuse": 0.90,
+      "optimal_threshold": 0.60
+    },
+    "devign": {
+      "num_cwe_classes": 58,
+      "lambda_fuse": 0.65,
+      "optimal_threshold": 0.65
+    }
+  }
+}
