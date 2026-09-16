@@ -11,11 +11,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSeq2SeqLM,
+    LogitsProcessorList,
+    LogitsProcessor,
+)
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
-# --- SYSTEM CONFIGURATION ---
+# System configurations
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
@@ -25,7 +30,22 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
 
-# --- PREPROCESSING UTILS ---
+# XAI utilities
+class TTFTProcessor(LogitsProcessor):
+    def __init__(self):
+        self.first_call = True
+        self.ttft_event = torch.cuda.Event(enable_timing=True)
+        self.recorded = False
+
+    def __call__(self, input_ids, scores):
+        if self.first_call:
+            self.ttft_event.record()
+            self.first_call = False
+            self.recorded = True
+        return scores
+
+
+# Preprocessing utilities
 def normalize_c_code_soft(code):
     if not isinstance(code, str):
         return ""
@@ -97,6 +117,7 @@ def preprocess_data_offline(data_list, tokenizer, config_model, show_progress=Tr
     return processed_samples
 
 
+# Dataset definition
 class FastVulnerabilityDataset(Dataset):
     def __init__(self, processed_data, pad_id):
         self.data = processed_data
@@ -116,14 +137,14 @@ class FastVulnerabilityDataset(Dataset):
         }
 
 
-# --- MODEL ARCHITECTURE ---
+# Model architecture
 class MultiTaskModel(nn.Module):
     def __init__(self, model_name, num_cwe_classes, hidden_size, dropout_rate):
         super().__init__()
         self.t5 = AutoModelForSeq2SeqLM.from_pretrained(
             model_name, trust_remote_code=True
         )
-        self.t5.config.use_cache = False
+        self.t5.config.use_cache = True
 
         self.classifier_head = nn.Sequential(
             nn.Dropout(dropout_rate),
@@ -152,14 +173,20 @@ class MultiTaskModel(nn.Module):
         return logits_binary, logits_cwe
 
 
-# --- EVALUATION MODE ---
+# Evaluation and fusion logic
 def semantic_aware_decision_fusion(
-    model, loader, device, lambda_fuse, threshold, num_samples
+    model, loader, device, lambda_fuse, threshold, num_samples, tok_latency_ms
 ):
     model.eval()
     y_true, y_bin_probs, y_sem_conf = [], [], []
 
-    # Init timing events
+    print("[INFO] Executing GPU warmup...")
+    dummy_ids = torch.zeros((1, 512), dtype=torch.long, device=device)
+    dummy_mask = torch.ones((1, 512), dtype=torch.long, device=device)
+    with torch.no_grad():
+        _ = model(dummy_ids, dummy_mask)
+    torch.cuda.synchronize()
+
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
@@ -183,8 +210,10 @@ def semantic_aware_decision_fusion(
 
     end_event.record()
     torch.cuda.synchronize()
-    total_latency_ms = start_event.elapsed_time(end_event)
-    avg_latency_ms = total_latency_ms / num_samples
+
+    total_det_latency_ms = start_event.elapsed_time(end_event)
+    avg_det_latency_ms = total_det_latency_ms / num_samples
+    end_to_end_latency_ms = tok_latency_ms + avg_det_latency_ms
 
     y_true = np.array(y_true)
     fused_scores = (lambda_fuse * np.array(y_bin_probs)) + (
@@ -206,11 +235,13 @@ def semantic_aware_decision_fusion(
     print(f"Accuracy         : {acc:.4f}")
     print("-" * 60)
     print(f"Total Samples    : {num_samples}")
-    print(f"Avg Latency      : {avg_latency_ms:.2f} ms/sample")
+    print(f"Tokenization (CPU)   : {tok_latency_ms:.2f} ms/sample")
+    print(f"Detection (Encoder)  : {avg_det_latency_ms:.2f} ms/sample")
+    print(f"Total Inference (E2E): {end_to_end_latency_ms:.2f} ms/sample")
     print("=" * 60 + "\n")
 
 
-# --- XAI MODE (RATIONALE GENERATION) ---
+# Rationale generation logic
 def generate_rationale_samples(
     model, loader, raw_samples, tokenizer, device, config_model, gen_config
 ):
@@ -222,18 +253,37 @@ def generate_rationale_samples(
     all_labels = []
     num_samples = len(raw_samples)
 
+    total_ttft_ms = 0.0
+    total_gen_ms = 0.0
+    num_batches = 0
+
+    print("[INFO] Executing GPU warmup for generation...")
+    dummy_ids = torch.zeros((1, 16), dtype=torch.long, device=device)
+    dummy_mask = torch.ones((1, 16), dtype=torch.long, device=device)
+    with torch.no_grad():
+        _ = base_model.t5.generate(
+            input_ids=dummy_ids,
+            attention_mask=dummy_mask,
+            max_new_tokens=2,
+            num_beams=gen_config.get("num_beams", 4),
+        )
+    torch.cuda.synchronize()
+
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
     print(f"[INFO] Generating rationales using Beam Search...")
 
-    start_event.record()
     for batch in tqdm(loader, desc="[INFO] Generation", unit="batch"):
         ids = batch["input_ids"].to(device)
         mask = batch["attention_mask"].to(device)
         labels = batch["label_bin"].to(device)
 
+        ttft_tracker = TTFTProcessor()
+        processors = LogitsProcessorList([ttft_tracker])
+
         try:
+            start_event.record()
             gen_ids = base_model.t5.generate(
                 input_ids=ids,
                 attention_mask=mask,
@@ -243,7 +293,15 @@ def generate_rationale_samples(
                 repetition_penalty=gen_config["repetition_penalty"],
                 length_penalty=gen_config["length_penalty"],
                 early_stopping=True,
+                logits_processor=processors,
             )
+            end_event.record()
+            torch.cuda.synchronize()
+
+            if ttft_tracker.recorded:
+                total_ttft_ms += start_event.elapsed_time(ttft_tracker.ttft_event)
+            total_gen_ms += start_event.elapsed_time(end_event)
+            num_batches += 1
 
             with torch.no_grad():
                 logits_bin, _ = model(ids, mask)
@@ -258,16 +316,12 @@ def generate_rationale_samples(
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 print(f"\n[FATAL] CUDA Out Of Memory during generation.")
-                print(
-                    f"        Action Required: Decrease batch_size in arguments or num_beams in config.json"
-                )
+                print(f"        Action Required: Decrease batch_size or num_beams")
                 sys.exit(1)
             raise e
 
-    end_event.record()
-    torch.cuda.synchronize()
-    total_latency_ms = start_event.elapsed_time(end_event)
-    avg_latency_ms = total_latency_ms / num_samples
+    avg_ttft_ms = total_ttft_ms / num_samples
+    avg_gen_ms = total_gen_ms / num_samples
 
     print("\n" + "=" * 80)
     print(f"{'QUALITATIVE CASE STUDIES':^80}")
@@ -294,12 +348,12 @@ def generate_rationale_samples(
         print(f"{all_generated_texts[i]}")
         print("=" * 80)
 
-    print(
-        f"\n[METRICS] XAI Generation Average Latency: {avg_latency_ms:.2f} ms/sample\n"
-    )
+    print(f"\n[METRICS] XAI Generation Latency Breakdown (Amortized):")
+    print(f"          Time To First Token (TTFT) : {avg_ttft_ms:.2f} ms/sample")
+    print(f"          Total Generation Time      : {avg_gen_ms:.2f} ms/sample\n")
 
 
-# --- MAIN ---
+# Main execution
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DOR-Vul Inference Pipeline")
     parser.add_argument(
@@ -332,14 +386,11 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Safely load configuration
     try:
         with open(args.config, "r") as f:
             config_full = json.load(f)
     except FileNotFoundError:
-        print(
-            f"[ERROR] Configuration file '{args.config}' not found. Please ensure it exists in the working directory."
-        )
+        print(f"[ERROR] Configuration file '{args.config}' not found.")
         sys.exit(1)
     except json.JSONDecodeError as e:
         print(f"[ERROR] Invalid JSON syntax in '{args.config}': {str(e)}")
@@ -359,11 +410,8 @@ if __name__ == "__main__":
     )
     print(f"[INFO] Initialized System Device: {device}")
 
-    # Enforce JSON-only test data
     if not args.test_data.endswith(".json"):
-        print(
-            "[ERROR] Strict Policy: Only JSON format is supported for data evaluation."
-        )
+        print("[ERROR] Strict Policy: Only JSON format is supported.")
         sys.exit(1)
 
     print(f"[INFO] Loading {args.dataset.upper()} Dataset...")
@@ -424,12 +472,10 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    # --- EXECUTION BRANCHING ---
     if args.show_rationales > 0:
         print(
             f"[INFO] XAI Mode Activated: Selecting {args.show_rationales} balanced samples. Bypassing global evaluation."
         )
-
         vuln_samples = [x for x in test_raw if int(x.get("label", 0)) == 1]
         safe_samples = [x for x in test_raw if int(x.get("label", 0)) == 0]
 
@@ -446,7 +492,6 @@ if __name__ == "__main__":
         test_proc = preprocess_data_offline(
             random_samples, tokenizer, model_config, show_progress=False
         )
-
         gen_batch_size = min(8, args.batch_size)
         test_loader = DataLoader(
             FastVulnerabilityDataset(test_proc, tokenizer.pad_token_id),
@@ -465,9 +510,13 @@ if __name__ == "__main__":
         )
     else:
         print("[INFO] Pre-processing Evaluation Data...")
+        t0 = time.perf_counter()
         test_proc = preprocess_data_offline(
             test_raw, tokenizer, model_config, show_progress=True
         )
+        t1 = time.perf_counter()
+        tok_latency_ms = ((t1 - t0) * 1000) / len(test_raw)
+
         test_loader = DataLoader(
             FastVulnerabilityDataset(test_proc, tokenizer.pad_token_id),
             batch_size=args.batch_size,
@@ -481,4 +530,5 @@ if __name__ == "__main__":
             lambda_fuse=data_config["lambda_fuse"],
             threshold=data_config["optimal_threshold"],
             num_samples=len(test_raw),
+            tok_latency_ms=tok_latency_ms,
         )
