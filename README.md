@@ -1,6 +1,6 @@
 # DOR-Vul
 
-[![Journal](https://img.shields.io/badge/Elsevier-Neurocomputing_Accepted-success?logo=elsevier)](https://www.journals.elsevier.com/neurocomputing)
+[![DOI](https://img.shields.io/badge/DOI-10.1016%2Fj.neucom.2026.135164-blue?logo=elsevier)](https://doi.org/10.1016/j.neucom.2026.135164)
 [![GitHub](https://img.shields.io/badge/GitHub-Repository-181717?logo=github)](https://github.com/csmuni/DOR-Vul/)
 <br>
 [![Release](https://img.shields.io/github/v/release/csmuni/DOR-Vul?logo=github&label=Release)](https://github.com/csmuni/DOR-Vul/releases)
@@ -85,13 +85,13 @@ Apache 2.0
 If you find this repository useful in your research, please consider citing our work. The BibTeX entry will be updated with the DOI upon final publication:
 
 ```bibtex
-@article{dorvul2026,
-  title={DOR-Vul: Cross-Modal Reasoning Distillation for Efficient Vulnerability Recognition},
-  author={Vafaei Moghadam, Amirreza and Giveki, Davar},
-  journal={Neurocomputing},
-  note={Accepted for publication},
-  publisher={Elsevier},
-  year={2026}
+@article{vafaei2026dorvul,
+  title   = {DOR-vul: Cross-modal reasoning distillation for efficient vulnerability recognition},
+  author  = {Amirreza {Vafaei Moghadam} and Davar Giveki},
+  journal = {Neurocomputing},
+  pages   = {135164},
+  year    = {2026},
+  doi     = {10.1016/j.neucom.2026.135164}
 }
 
 ```
