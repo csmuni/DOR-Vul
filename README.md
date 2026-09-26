@@ -85,12 +85,14 @@ Apache 2.0
 If you find this repository useful in your research, please consider citing our work. The BibTeX entry will be updated with the DOI upon final publication:
 
 ```bibtex
-@article{vafaei2026dorvul,
+@article{vafaei2027dorvul,
   title   = {DOR-vul: Cross-modal reasoning distillation for efficient vulnerability recognition},
   author  = {Amirreza {Vafaei Moghadam} and Davar Giveki},
   journal = {Neurocomputing},
+  volume  = {707},
   pages   = {135164},
-  year    = {2026},
+  year    = {2027},
+  issn    = {0925-2312},
   doi     = {10.1016/j.neucom.2026.135164}
 }
 
